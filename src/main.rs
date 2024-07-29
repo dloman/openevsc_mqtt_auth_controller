@@ -1,10 +1,12 @@
 use bytes::Bytes;
+use chrono;
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use rumqttc::{Client, MqttOptions, QoS, Event::*, Packet::Publish};
 use std::collections::BTreeMap;
 use std::time::Duration;
-use std::fs::File;
-use std::io::BufReader;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Write};
 use std::str::FromStr;
 extern crate pretty_env_logger;
 #[macro_use] extern crate log;
@@ -107,7 +109,9 @@ fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, cli
             match current_session {
                 Some(mut session) => {
                     session.kw_used = kw_hours;
-                    if session.user.kwh_remaining <= kw_hours {
+                    let current_hour = chrono::offset::Local::now().time().hour();
+                    info!("current time is {}", current_hour);
+                    if session.user.kwh_remaining <= kw_hours  || (current_hour >= 16 && current_hour <= 21) {
                         send_override(State::Disabled, client);
                     }
                     return Some(session);
@@ -141,7 +145,26 @@ fn handle_vehicle(payload : &Bytes, current_session: Option<Session>, users: &mu
                     let mut user = session.user;
                     info!("removing {:.2}kWh from user {} balance of {} ", session.kw_used, user.name, user.kwh_remaining);
                     user.kwh_remaining -= session.kw_used;
+                    user.total_lifetime_usage += session.kw_used;
+                    info!("new user = {:?}", user.clone());
                     users.insert(user.rfid.clone(), user);
+
+                    let user_list : Vec<&mut User> = users.into_iter().map(|(_name, user)| user).collect();
+
+                    match OpenOptions::new().write(true).truncate(true).open("users.json".to_string()) {
+                        Ok(f) => {
+                            let mut writer = BufWriter::new(f);
+                            match serde_json::to_writer_pretty(&mut writer, &user_list) {
+                                Ok(_) => {
+                                    if let Err(e) = writer.flush() {
+                                        error!("flush failed {}", e);
+                                    }
+                                },
+                                Err(e) => { error!("write failed: {}", e); }
+                            }
+                        },
+                        Err(e) => { error!("unable to open file: {}", e) }
+                    }
                     return None;
                 },
                 None => { return None; }
