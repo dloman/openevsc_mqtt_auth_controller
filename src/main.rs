@@ -111,7 +111,7 @@ fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, cli
                     session.kw_used = kw_hours;
                     let current_hour = chrono::offset::Local::now().time().hour();
                     info!("current time is {}", current_hour);
-                    if session.user.kwh_remaining <= kw_hours  || (current_hour >= 16 && current_hour <= 21) {
+                    if session.user.kwh_remaining <= kw_hours  || (current_hour >= 16 && current_hour <= 20) {
                         send_override(State::Disabled, client);
                     }
                     return Some(session);
