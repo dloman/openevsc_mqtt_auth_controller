@@ -2,7 +2,7 @@ use bytes::Bytes;
 use chrono;
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
-use rumqttc::{Client, MqttOptions, QoS, Event::*, Packet::Publish};
+use rumqttc::{Client, MqttOptions, QoS, Event, Event::*, Packet::Publish, ConnectionError};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use std::fs::{File, OpenOptions};
@@ -15,6 +15,17 @@ const RFID: &str = "evcharger1/rfid_auth";
 const OVERRIDE: &str = "evcharger1/override";
 const ENERGY: &str = "evcharger1/session_energy";
 const VEHICLE: &str = "evcharger1/vehicle";
+
+fn handle_packet(notification : Result<Event, ConnectionError>) -> (String, Bytes) {
+    if let Ok(event) = notification {
+        if let Incoming(incoming) = event {
+            if let Publish(publish) = incoming {
+                return (publish.topic, publish.payload);
+            }
+        }
+    }
+    return ("".to_string(), Bytes::new());
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct User {
@@ -202,30 +213,16 @@ fn main() -> std::io::Result<()> {
     let mut current_session : Option<Session>  = None;
 
     // Iterate through the notifications in the connection and handle each notification
-    for (i, notification) in connection.iter().enumerate() {
-        match notification {
-            Ok(n) => {
-                match n {
-                    Incoming(incoming) => {
-                        match incoming {
-                            Publish(ref publish) => {
-                                match publish.topic.as_str() {
-                                    RFID  => { current_session = handle_rfid(&publish.payload, current_session, &client, &users); },
-                                    ENERGY  => { current_session = handle_energy(&publish.payload, current_session, &client); },
-                                    OVERRIDE  => { handle_override(&publish.payload); },
-                                    VEHICLE  => { current_session = handle_vehicle(&publish.payload, current_session, &mut users, &client); },
-                                    _ => { }
-                                }
-                            },
-                            _ => {} // non publish types
-                        }
-                    },
-                    _ => {} // Outgoing and other packet types
-                }
-            },
-            Err(error) => {
-                println!("Error {i}. Notification = {error:?}");
-            }
+    for notification in connection.iter() {
+
+        let (topic , payload) = handle_packet(notification);
+
+        match topic.as_str() {
+            RFID  => { current_session = handle_rfid(&payload, current_session, &client, &users); },
+            ENERGY  => { current_session = handle_energy(&payload, current_session, &client); },
+            OVERRIDE  => { handle_override(&payload); },
+            VEHICLE  => { current_session = handle_vehicle(&payload, current_session, &mut users, &client); },
+            _ => { }
         }
     }
 
