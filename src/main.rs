@@ -7,9 +7,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
+use std::ops::Mul;
 use std::str::FromStr;
 extern crate pretty_env_logger;
 #[macro_use] extern crate log;
+extern crate derive_more;
+use derive_more::{Sub, AddAssign, SubAssign};
 
 const RFID: &str = "evcharger1/rfid_auth";
 const OVERRIDE: &str = "evcharger1/override";
@@ -27,13 +30,54 @@ fn handle_packet(notification : Result<Event, ConnectionError>) -> (String, Byte
     return ("".to_string(), Bytes::new());
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign, Sub)]
+struct KiloWattHours(f64);
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DollarsPerKiloWattHour(f64);
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign, SubAssign)]
+struct Dollars(f64);
+
+impl Mul<DollarsPerKiloWattHour> for KiloWattHours {
+    type Output = Dollars;
+    fn mul(self, rhs: DollarsPerKiloWattHour) -> Dollars {
+        return Dollars(rhs.0 *self.0);
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign)]
+struct Usage {
+    on_peak: KiloWattHours,
+    off_peak: KiloWattHours,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct User {
     name: String,
     rfid: String,
-    kwh_remaining: f64,
-    total_lifetime_usage: f64,
+    dollars_remaining: Dollars,
+    total_lifetime_usage: Usage,
 }
+
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Rate {
+    start : u32,
+    end : u32,
+    price_per_kwh : DollarsPerKiloWattHour,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Rates {
+    on_peak : Rate,
+    off_peak : Rate,
+}
+
+const RATES: Rates = Rates{
+    on_peak: Rate{start:16, end:21, price_per_kwh: DollarsPerKiloWattHour(0.85)},
+    off_peak: Rate{start:0, end:0, price_per_kwh: DollarsPerKiloWattHour(0.35)},
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -52,7 +96,8 @@ struct Override {
 #[derive(Debug, Clone)]
 struct Session {
     user : User,
-    kw_used : f64,
+    kwh_used : KiloWattHours,
+    usage : Usage,
     is_connected : bool,
 }
 
@@ -76,7 +121,7 @@ fn handle_rfid(payload : &Bytes, current_session: Option<Session>, client : &Cli
         Some(_session) => { Some(_session) },
         None => {
             match new_user {
-                Some(new_user) => { Some(Session{ user : new_user, kw_used : 0.0, is_connected : false}) },
+                Some(new_user) => { Some(Session{ user : new_user, usage : Default::default(), is_connected : false, kwh_used : KiloWattHours(0.0)}) },
                 None => { None}
             }
         }
@@ -100,10 +145,10 @@ fn handle_override(payload : &Bytes) {
     }
 }
 
-fn handle_energy(payload : &Bytes, current_session: Option<Session>, client: &Client) -> Option<Session> {
+fn handle_energy(payload : &Bytes, current_session: Option<Session>) -> Option<Session> {
     match std::str::from_utf8(&payload) {
         Ok(watt_hours) => {
-            return add_energy_to_session(&watt_hours, current_session, &client);
+            return add_energy_to_session(&watt_hours, current_session);
         },
         Err(e) => {
             error!("{}", e);
@@ -112,19 +157,27 @@ fn handle_energy(payload : &Bytes, current_session: Option<Session>, client: &Cl
     }
 }
 
-fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, client: &Client)  -> Option<Session> {
+fn get_usage(update : KiloWattHours, mut usage : Usage, current_hour : u32) -> Usage {
+    if current_hour >= RATES.on_peak.start && current_hour < RATES.on_peak.end {
+        usage.on_peak += update;
+    } else {
+        usage.off_peak += update;
+    }
+    return usage;
+}
+
+fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>)  -> Option<Session> {
     match f64::from_str(watt_hours) {
         Ok(watt_hours) => {
-            let kw_hours = watt_hours/1000.0;
-            info!("Current charging session has used {:.2}kWh", kw_hours);
+            let kw_hours = KiloWattHours(watt_hours/1000.0);
+            info!("Current charging session has used {:?}kWh", kw_hours);
             match current_session {
                 Some(mut session) => {
-                    session.kw_used = kw_hours;
                     let current_hour = chrono::offset::Local::now().time().hour();
                     info!("current time is {}", current_hour);
-                    if session.user.kwh_remaining <= kw_hours  || (current_hour >= 16 && current_hour <= 20) {
-                        send_override(State::Disabled, client);
-                    }
+
+                    session.usage = get_usage(kw_hours.clone() - session.kwh_used, session.usage, current_hour);
+                    session.kwh_used = kw_hours;
                     return Some(session);
                 },
                 None => { None }
@@ -134,6 +187,35 @@ fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, cli
             error!("{}", e);
             return current_session;
         }
+    }
+}
+
+fn update_user(mut user: User, usage : Usage) -> User {
+    let mut dollars_used = usage.on_peak.clone() * RATES.on_peak.price_per_kwh;
+    dollars_used += usage.off_peak.clone() * RATES.off_peak.price_per_kwh;
+    info!("removing current session {:?} from user {} balance of {:?} ", dollars_used, user.name, user.dollars_remaining);
+    user.dollars_remaining -= dollars_used;
+    user.total_lifetime_usage += usage;
+    info!("new user = {:?}", user.clone());
+    return user;
+}
+
+fn write_user_json(users:&mut BTreeMap<String, User>) {
+    let user_list : Vec<&mut User> = users.into_iter().map(|(_name, user)| user).collect();
+
+    match OpenOptions::new().write(true).truncate(true).open("users.json".to_string()) {
+        Ok(f) => {
+            let mut writer = BufWriter::new(f);
+            match serde_json::to_writer_pretty(&mut writer, &user_list) {
+                Ok(_) => {
+                    if let Err(e) = writer.flush() {
+                        error!("flush failed {}", e);
+                    }
+                },
+                Err(e) => { error!("write failed: {}", e); }
+            }
+        },
+        Err(e) => { error!("unable to open file: {}", e) }
     }
 }
 
@@ -153,29 +235,9 @@ fn handle_vehicle(payload : &Bytes, current_session: Option<Session>, users: &mu
                     }
 
                     send_override(State::Disabled, client);
-                    let mut user = session.user;
-                    info!("removing {:.2}kWh from user {} balance of {} ", session.kw_used, user.name, user.kwh_remaining);
-                    user.kwh_remaining -= session.kw_used;
-                    user.total_lifetime_usage += session.kw_used;
-                    info!("new user = {:?}", user.clone());
+                    let user = update_user(session.user, session.usage);
                     users.insert(user.rfid.clone(), user);
-
-                    let user_list : Vec<&mut User> = users.into_iter().map(|(_name, user)| user).collect();
-
-                    match OpenOptions::new().write(true).truncate(true).open("users.json".to_string()) {
-                        Ok(f) => {
-                            let mut writer = BufWriter::new(f);
-                            match serde_json::to_writer_pretty(&mut writer, &user_list) {
-                                Ok(_) => {
-                                    if let Err(e) = writer.flush() {
-                                        error!("flush failed {}", e);
-                                    }
-                                },
-                                Err(e) => { error!("write failed: {}", e); }
-                            }
-                        },
-                        Err(e) => { error!("unable to open file: {}", e) }
-                    }
+                    write_user_json(users);
                     return None;
                 },
                 None => { return None; }
@@ -210,7 +272,7 @@ fn main() -> std::io::Result<()> {
     client.subscribe(ENERGY, QoS::AtMostOnce).unwrap();
     client.subscribe(VEHICLE, QoS::AtMostOnce).unwrap();
 
-    let mut current_session : Option<Session>  = None;
+    let mut current_session : Option<Session> = None;
 
     // Iterate through the notifications in the connection and handle each notification
     for notification in connection.iter() {
@@ -219,7 +281,7 @@ fn main() -> std::io::Result<()> {
 
         match topic.as_str() {
             RFID  => { current_session = handle_rfid(&payload, current_session, &client, &users); },
-            ENERGY  => { current_session = handle_energy(&payload, current_session, &client); },
+            ENERGY  => { current_session = handle_energy(&payload, current_session); },
             OVERRIDE  => { handle_override(&payload); },
             VEHICLE  => { current_session = handle_vehicle(&payload, current_session, &mut users, &client); },
             _ => { }
