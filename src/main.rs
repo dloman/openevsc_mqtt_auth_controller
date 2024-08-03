@@ -31,25 +31,25 @@ fn handle_packet(notification : Result<Event, ConnectionError>) -> (String, Byte
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign, Sub)]
-struct KiloWattHours(f64);
+struct KWh(f64);
 
 #[derive(Serialize, Deserialize, Debug)]
-struct DollarsPerKiloWattHour(f64);
+struct DollarsPerkWh(f64);
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign, SubAssign)]
 struct Dollars(f64);
 
-impl Mul<DollarsPerKiloWattHour> for KiloWattHours {
+impl Mul<DollarsPerkWh> for KWh {
     type Output = Dollars;
-    fn mul(self, rhs: DollarsPerKiloWattHour) -> Dollars {
+    fn mul(self, rhs: DollarsPerkWh) -> Dollars {
         return Dollars(rhs.0 *self.0);
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign)]
 struct Usage {
-    on_peak: KiloWattHours,
-    off_peak: KiloWattHours,
+    on_peak: KWh,
+    off_peak: KWh,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -65,7 +65,7 @@ struct User {
 struct Rate {
     start : u32,
     end : u32,
-    price_per_kwh : DollarsPerKiloWattHour,
+    price_per_kwh : DollarsPerkWh,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -75,8 +75,8 @@ struct Rates {
 }
 
 const RATES: Rates = Rates{
-    on_peak: Rate{start:16, end:21, price_per_kwh: DollarsPerKiloWattHour(0.85)},
-    off_peak: Rate{start:0, end:0, price_per_kwh: DollarsPerKiloWattHour(0.35)},
+    on_peak: Rate{start:16, end:21, price_per_kwh: DollarsPerkWh(0.85)},
+    off_peak: Rate{start:0, end:0, price_per_kwh: DollarsPerkWh(0.35)},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -96,7 +96,7 @@ struct Override {
 #[derive(Debug, Clone)]
 struct Session {
     user : User,
-    kwh_used : KiloWattHours,
+    kwh_used : KWh,
     usage : Usage,
     is_connected : bool,
 }
@@ -121,7 +121,7 @@ fn handle_rfid(payload : &Bytes, current_session: Option<Session>, client : &Cli
         Some(_session) => { Some(_session) },
         None => {
             match new_user {
-                Some(new_user) => { Some(Session{ user : new_user, usage : Default::default(), is_connected : false, kwh_used : KiloWattHours(0.0)}) },
+                Some(new_user) => { Some(Session{ user : new_user, usage : Default::default(), is_connected : false, kwh_used : KWh(0.0)}) },
                 None => { None}
             }
         }
@@ -157,7 +157,7 @@ fn handle_energy(payload : &Bytes, current_session: Option<Session>) -> Option<S
     }
 }
 
-fn get_usage(update : KiloWattHours, mut usage : Usage, current_hour : u32) -> Usage {
+fn get_usage(update : KWh, mut usage : Usage, current_hour : u32) -> Usage {
     if current_hour >= RATES.on_peak.start && current_hour < RATES.on_peak.end {
         usage.on_peak += update;
     } else {
@@ -169,8 +169,8 @@ fn get_usage(update : KiloWattHours, mut usage : Usage, current_hour : u32) -> U
 fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>)  -> Option<Session> {
     match f64::from_str(watt_hours) {
         Ok(watt_hours) => {
-            let kw_hours = KiloWattHours(watt_hours/1000.0);
-            info!("Current charging session has used {:?}kWh", kw_hours);
+            let kw_hours = KWh(watt_hours/1000.0);
+            info!("Current charging session has used {:?}", kw_hours);
             match current_session {
                 Some(mut session) => {
                     let current_hour = chrono::offset::Local::now().time().hour();
