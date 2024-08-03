@@ -223,7 +223,7 @@ fn handle_vehicle(payload : &Bytes, current_session: Option<Session>, users: &mu
     match std::str::from_utf8(&payload) {
         Ok(is_connected) => {
             let is_connected = is_connected == "1";
-            info!("vehcile message = {} current session {:?}", is_connected, current_session);
+            info!("vehicle message = {} current session {:?}", is_connected, current_session);
             match current_session {
                 Some(mut session) => {
                     if is_connected {
