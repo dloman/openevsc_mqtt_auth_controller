@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use chrono;
-use chrono::{Timelike};
+use chrono::{Weekday, Timelike, Datelike, DateTime, Local};
 use serde::{Deserialize, Serialize};
 use rumqttc::{Client, MqttOptions, QoS, Event, Event::*, Packet::Publish, ConnectionError};
 use std::collections::BTreeMap;
@@ -100,17 +100,6 @@ struct User {
     dollars_remaining: Dollars,
     total_lifetime_usage: Usage,
     customer_id: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum Weekday {
-    Mon = 0,
-    Tue = 1,
-    Wed = 2,
-    Thu = 3,
-    Fri = 4,
-    Sat = 5,
-    Sun = 6,
 }
 
 #[derive(Debug)]
@@ -216,10 +205,16 @@ fn handle_energy(payload : &Bytes, current_session: Option<Session>, client: &Cl
     }
 }
 
-fn get_usage(update : KWh, mut usage : Usage, current_hour : u32) -> Usage {
-    if current_hour >= RATES.on_peak.start && current_hour < RATES.on_peak.end {
+fn get_usage(update : KWh, mut usage : Usage, now : DateTime<Local>) -> Usage {
+    let hour = now.time().hour();
+    info!("{:#?} {:#?} {:#?} {:#?} {:#?} {:#?}", update, usage, hour, now, RATES.on_peak.start, RATES.on_peak.end);
+
+    if hour >= RATES.on_peak.start && hour < RATES.on_peak.end && RATES.on_peak.days.contains(&now.date_naive().weekday()) {
         usage.on_peak += update;
-    } else {
+    } 
+    else if hour >= RATES.mid_peak.start && hour < RATES.mid_peak.end && RATES.mid_peak.days.contains(&now.date_naive().weekday()) {
+    } 
+    else {
         usage.off_peak += update;
     }
     return usage;
@@ -232,9 +227,9 @@ fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, cli
             info!("Current charging session has used {:?}", kw_hours);
             match current_session {
                 Some(mut session) => {
-                    let current_hour = chrono::offset::Local::now().time().hour();
+                    let current_datetime = chrono::offset::Local::now();
 
-                    session.usage = get_usage(kw_hours.clone() - session.kwh_used.clone(), session.usage.clone(), current_hour);
+                    session.usage = get_usage(kw_hours.clone() - session.kwh_used.clone(), session.usage.clone(), current_datetime);
                     info!("current cost is {:#?} remaining money is {:#?}", compute_cost(session.usage.clone()), session.user.dollars_remaining);
                     info!("Current charging session has used {:?}", session.usage);
                     if session.user.dollars_remaining <= compute_cost(session.usage.clone()) {
