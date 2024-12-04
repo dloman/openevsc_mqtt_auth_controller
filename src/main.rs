@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use chrono;
-use chrono::Timelike;
+use chrono::{Timelike};
 use serde::{Deserialize, Serialize};
 use rumqttc::{Client, MqttOptions, QoS, Event, Event::*, Packet::Publish, ConnectionError};
 use std::collections::BTreeMap;
@@ -89,6 +89,7 @@ impl Mul<DollarsPerkWh> for KWh {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, AddAssign)]
 struct Usage {
     on_peak: KWh,
+    mid_peak: KWh,
     off_peak: KWh,
 }
 
@@ -101,23 +102,40 @@ struct User {
     customer_id: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Weekday {
+    Mon = 0,
+    Tue = 1,
+    Wed = 2,
+    Thu = 3,
+    Fri = 4,
+    Sat = 5,
+    Sun = 6,
+}
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Rate {
+#[derive(Debug)]
+struct Rate<'a> {
     start : u32,
     end : u32,
+    days : &'a[Weekday],
     price_per_kwh : DollarsPerkWh,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Rates {
-    on_peak : Rate,
-    off_peak : Rate,
+#[derive(Debug)]
+struct Rates<'a> {
+    on_peak : Rate<'a>,
+    mid_peak : Rate<'a>,
+    off_peak : Rate<'a>,
 }
 
+const WEEKDAYS: [Weekday; 5] = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri];
+const WEEKENDS: [Weekday; 2] = [Weekday::Sat, Weekday::Sun];
+const ALL_DAYS: [Weekday; 7] = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun];
+
 const RATES: Rates = Rates{
-    on_peak: Rate{start:16, end:21, price_per_kwh: DollarsPerkWh(0.85)},
-    off_peak: Rate{start:0, end:0, price_per_kwh: DollarsPerkWh(0.35)},
+    on_peak: Rate{start:16, end:21, days: &WEEKDAYS, price_per_kwh: DollarsPerkWh(0.85)},
+    mid_peak: Rate{start:16, end:21, days: &WEEKENDS, price_per_kwh: DollarsPerkWh(0.40)},
+    off_peak: Rate{start:0, end:0, days: &ALL_DAYS, price_per_kwh: DollarsPerkWh(0.35)},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -218,6 +236,7 @@ fn add_energy_to_session(watt_hours: &str, current_session: Option<Session>, cli
 
                     session.usage = get_usage(kw_hours.clone() - session.kwh_used.clone(), session.usage.clone(), current_hour);
                     info!("current cost is {:#?} remaining money is {:#?}", compute_cost(session.usage.clone()), session.user.dollars_remaining);
+                    info!("Current charging session has used {:?}", session.usage);
                     if session.user.dollars_remaining <= compute_cost(session.usage.clone()) {
                         match charge_user(session.user.clone(), bt) {
                             Ok(charged_user) => { session.user = charged_user; }
