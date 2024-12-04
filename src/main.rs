@@ -53,7 +53,7 @@ fn charge_user(mut user : User, bt : &Braintree) -> Result<User, braintree::Erro
                     return Ok(user);
                 },
                 Err(err) => {
-                    error!("\nError: {}\n", err);
+                    error!("\nError: {:#?}\n", err);
                     return Err(err);
                 }
             }
@@ -336,8 +336,10 @@ fn main() -> std::io::Result<()> {
     pretty_env_logger::init();
 
     let merchant_id = std::env::var("MERCHANT_ID").expect("environment variable MERCHANT_ID is not defined");
+    let environment = Environment::from_str(
+        &std::env::var("ENVIRONMENT").expect("environment variable ENVIRONMENT is not defined")).expect("must be either \"Sandbox or Production\"");
     let bt = Braintree::new(
-        Environment::Sandbox,
+        environment,
         merchant_id.clone(),
         std::env::var("PUBLIC_KEY").expect("environment variable PUBLIC_KEY is not defined"),
         std::env::var("PRIVATE_KEY").expect("environment variable PRIVATE_KEY is not defined"),
